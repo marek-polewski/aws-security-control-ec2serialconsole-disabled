@@ -13,6 +13,6 @@ The stack provides the following features:
 As SNS supports cross-region delivery, the same topic can be used in all regions. Please remember to add "events.amazonaws.com" principal to SNS topic Access Policy.
 
 
-Config-based remediation will notice a problem after a specified check period (at least 1h). The event-based approach will react in around 20 seconds.
+Config will notice a problem after a specified check period (at least 1h). The event-based approach will react in around 20 seconds.
 
 If your accounts are in AWS organizations, you can use scp-ec2-serial-console-deny.yaml to block EnableSerialConsoleAccess actions. There are ways to go around SCPs, so monitoring with remediation action is still needed. 

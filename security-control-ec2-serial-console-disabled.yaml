@@ -101,8 +101,8 @@ Resources:
                 Action: "config:PutEvaluations"
                 Resource: "*"
       Tags: 
-        Key: !Ref ProtectedTagName
-        Value: "true"
+        - Key: !Ref ProtectedTagName
+          Value: "true"
 
   EC2SerialConsoleDisabledCheckLambdaLogGroup:
     Type: AWS::Logs::LogGroup
@@ -110,8 +110,8 @@ Resources:
       LogGroupName: !Sub '/aws/lambda/${EC2SerialConsoleDisabledCheckLambda}'
       RetentionInDays: 90
       Tags: 
-        Key: !Ref ProtectedTagName
-        Value: "true"
+        - Key: !Ref ProtectedTagName
+          Value: "true"
 
   EC2SerialConsoleDisabledCheckLambda: 
     Type: AWS::Lambda::Function
@@ -138,8 +138,8 @@ Resources:
       Timeout: 10
       Role: !GetAtt EC2SerialConsoleDisabledCheckLambdaRole.Arn
       Tags: 
-        Key: !Ref ProtectedTagName
-        Value: "true"
+        - Key: !Ref ProtectedTagName
+          Value: "true"
 
   LambdaErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -204,8 +204,8 @@ Resources:
                 Action: "ec2:DisableSerialConsoleAccess"
                 Resource: "*"
       Tags: 
-        Key: !Ref ProtectedTagName
-        Value: "true"
+        - Key: !Ref ProtectedTagName
+          Value: "true"
 
 
   DisableEC2SerialConsoleDocument:
@@ -235,8 +235,8 @@ Resources:
                 def script_handler(events, context):
                     return boto3.client('ec2').disable_serial_console_access()
       Tags: 
-        Key: !Ref ProtectedTagName
-        Value: "true"
+        - Key: !Ref ProtectedTagName
+          Value: "true"
 
 
 # AWS Config Remediation
@@ -279,8 +279,8 @@ Resources:
                 Action: "ssm:StartAutomationExecution"
                 Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${DisableEC2SerialConsoleDocument}:$DEFAULT"
       Tags: 
-        Key: !Ref ProtectedTagName
-        Value: "true"
+        - Key: !Ref ProtectedTagName
+          Value: "true"
 
   EventDriverRule: 
     Type: AWS::Events::Rule
@@ -304,9 +304,6 @@ Resources:
           - Arn: !Ref SNSTopic
             Id: "SNSNotify"
           - !Ref "AWS::NoValue"
-      Tags: 
-        Key: !Ref ProtectedTagName
-        Value: "true"
 
 # Notify on rule not compliant
   NotificationRule: 
