@@ -1,0 +1,43 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::LanguageExtensions
+Description: SCP - prevent enabling ec2-serial-console
+
+Parameters:
+  TargetIds:
+    Type: List<String>
+    Description: Coma Separated list of targets
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Organisation
+        Parameters:
+          - TargetIds
+    ParameterLabels:
+      TargetIds:
+        default: AWS accounts IDs, AWS Organization root node ID or Organization Units IDs
+
+Resources:
+  EC2SerialConsolePreventSCP:
+    Type: AWS::Organizations::Policy
+    Properties: 
+      Content:
+        "Fn::ToJsonString":
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Deny"
+              Action: 
+                - "ec2:EnableSerialConsoleAccess"
+              Resource: "*"
+      Description: Prevent enabling ec2-serial-console
+      Name: PreventUseOf-EC2SerialConsole
+      Tags: 
+        - Key: StackName
+          Value:
+            Ref: AWS::StackName
+        - Key: ResourceName
+          Value:
+            Fn::Sub: ${AWS::StackName}-EC2SerialConsolePreventSCP
+      TargetIds: !Ref TargetIds
+      Type: SERVICE_CONTROL_POLICY

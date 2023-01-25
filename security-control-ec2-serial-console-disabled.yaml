@@ -1,0 +1,333 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Security Control enforcing ec2-serial-console being disabled (regional)
+
+Parameters:
+  ConfigCheckPeriod:
+    Type: String
+    Default: "One_Hour"
+    AllowedValues:
+      - "One_Hour"
+      - "Three_Hours"
+      - "Six_Hours"
+      - "Twelve_Hours"
+      - "TwentyFour_Hours"
+
+  ConfigAutoRemediate:
+    Type: String
+    Description: "This will trigger SSM Automation Document after NOT_COMPLIANT result of evaluation"
+    Default: "yes"
+    AllowedValues:
+      - "yes"
+      - "no"
+
+  EventAutoRemediate:
+    Type: String
+    Description: "This will trigger SSM Automation Document after EnableSerialConsoleAccess API call"
+    Default: "yes"
+    AllowedValues:
+      - "yes"
+      - "no"
+
+  SNSTopic:
+    Type: String
+    Description: "Provide SNS topic to notify on compliance failure or illegal API calls"
+    Default: ""
+
+  ProtectedTagName:
+    Type: String
+    Description: "Provide the tag name that you will use for ABAC protection"
+    Default: "SOCResource"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: AWS Config
+        Parameters:
+          - ConfigCheckPeriod
+          - ConfigAutoRemediate
+      - Label:
+          default: AWS EventBridge
+        Parameters:
+          - EventAutoRemediate
+      - Label:
+          default: Notifications
+        Parameters:
+          - SNSTopic
+      - Label:
+          default: Misc
+        Parameters:
+          - ProtectedTagName
+    ParameterLabels:
+      ConfigCheckPeriod:
+        default: Rule check period
+      ConfigAutoRemediate:
+        default: Enable remediation
+      EventAutoRemediate:
+        default: Enable CloudTrail event-triggered Remediation
+      SNSTopic:
+        default: SNS Topic
+      ProtectedTagName:
+        default: Tag Key applied on all resources
+
+Conditions:
+  ConfigAutoRemediate: !Equals [!Ref ConfigAutoRemediate, "yes"]
+  EventAutoRemediate: !Equals [!Ref EventAutoRemediate, "yes"]
+  EnableNotification: !Not [!Equals [!Ref SNSTopic, ""]]
+
+Resources:
+  EC2SerialConsoleDisabledCheckLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "Custom Confir Control: EC2SerailConsoleDisabled"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: Check-EC2SerialConsoleAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "ec2:GetSerialConsoleAccessStatus"
+                Resource: "*"
+              - Effect: Allow
+                Action: "config:PutEvaluations"
+                Resource: "*"
+      Tags: 
+        Key: !Ref ProtectedTagName
+        Value: "true"
+
+  EC2SerialConsoleDisabledCheckLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${EC2SerialConsoleDisabledCheckLambda}'
+      RetentionInDays: 90
+      Tags: 
+        Key: !Ref ProtectedTagName
+        Value: "true"
+
+  EC2SerialConsoleDisabledCheckLambda: 
+    Type: AWS::Lambda::Function
+    Properties: 
+      Code: 
+        ZipFile: 
+           !Sub |
+              import os, json, boto3
+
+              def lambda_handler(event, context):
+                  response = boto3.client('ec2').get_serial_console_access_status()
+
+                  return boto3.client('config').put_evaluations(Evaluations=[{
+                      "ComplianceResourceType": "AWS::::Account",
+                      "ComplianceResourceId": f"{event['accountId']}-{os.getenv('AWS_DEFAULT_REGION')}",
+                      "ComplianceType": "COMPLIANT" if not response["SerialConsoleAccessEnabled"] else 'NON_COMPLIANT',
+                      "OrderingTimestamp": str(json.loads(event['invokingEvent'])['notificationCreationTime']),
+                      }], ResultToken=event['resultToken'])
+
+      Handler: "index.lambda_handler"
+      Runtime: python3.9
+      Architectures:
+        - "arm64"
+      Timeout: 10
+      Role: !GetAtt EC2SerialConsoleDisabledCheckLambdaRole.Arn
+      Tags: 
+        Key: !Ref ProtectedTagName
+        Value: "true"
+
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "${EC2SerialConsoleDisabledCheckLambda} errors"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Maximum
+      Period: 3600
+      Threshold: 1
+      DatapointsToAlarm: 1
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub '${EC2SerialConsoleDisabledCheckLambda}'
+      TreatMissingData: missing
+
+  ConfigPermissionToCallLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !GetAtt EC2SerialConsoleDisabledCheckLambda.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "config.amazonaws.com"
+      SourceAccount: !Ref 'AWS::AccountId'
+      # SourceArn: !GetAtt ConfigRuleEC2SerialConsoleDisabled.Arn # this leads to circular dependency, but can be uncommented after the first deploy...
+
+  ConfigRuleEC2SerialConsoleDisabled: 
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigPermissionToCallLambda
+    Properties: 
+      ConfigRuleName: Custom-EC2SerialConsoleDisabled
+      Source: 
+         Owner: "CUSTOM_LAMBDA"
+         SourceDetails: 
+           -  EventSource: "aws.config"
+              MessageType: "ScheduledNotification"
+              MaximumExecutionFrequency: !Ref ConfigCheckPeriod
+         SourceIdentifier: !GetAtt EC2SerialConsoleDisabledCheckLambda.Arn
+
+# Remediation
+  DisableEC2SerialConsoleDocumentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "Disable EC2SerialConsole SSM automation role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole
+      Policies:
+        - PolicyName: AWSSystemsManagerAutomationEC2DisableSerialConsole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "ec2:DisableSerialConsoleAccess"
+                Resource: "*"
+      Tags: 
+        Key: !Ref ProtectedTagName
+        Value: "true"
+
+
+  DisableEC2SerialConsoleDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      Content:
+        description: "Automation for AWS Config to disable EC2 Serial Consoles access on account"
+        schemaVersion: '0.3'
+        assumeRole: !GetAtt DisableEC2SerialConsoleDocumentRole.Arn
+        parameters:
+          AutomationAssumeRole: # we are force to create this param by RemediationConfiguration resource
+            type: String
+            default: ""
+        mainSteps:
+          - name: DisableEC2SerialConsole
+            description: Disables EC2SerialConsole in region
+            action: 'aws:executeScript'
+            onFailure: Abort
+            maxAttempts: 1
+            timeoutSeconds: 30
+            inputs:
+              Runtime: python3.8
+              Handler: script_handler
+              Script: |-
+                import boto3
+                def script_handler(events, context):
+                    return boto3.client('ec2').disable_serial_console_access()
+      Tags: 
+        Key: !Ref ProtectedTagName
+        Value: "true"
+
+
+# AWS Config Remediation
+  DisableEC2SerialConsoleAutoRemediation:
+    Type: "AWS::Config::RemediationConfiguration"
+    Properties:
+        Automatic: !If [ConfigAutoRemediate, True, False]
+        Parameters:
+          AutomationAssumeRole: 
+            StaticValue:
+              Values: 
+                - !GetAtt DisableEC2SerialConsoleDocumentRole.Arn
+        ConfigRuleName: !Ref ConfigRuleEC2SerialConsoleDisabled
+        TargetId: !Ref DisableEC2SerialConsoleDocument
+        TargetType: "SSM_DOCUMENT"
+        MaximumAutomaticAttempts: 5 
+        RetryAttemptSeconds: 60
+
+
+# Realtime reaction
+  EventDriverRuleRole:
+    Condition: EventAutoRemediate
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "EventBus Triggering SSM Document"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: AWSSystemsManagerAutomationEC2DisableSerialConsole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "ssm:StartAutomationExecution"
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${DisableEC2SerialConsoleDocument}:$DEFAULT"
+      Tags: 
+        Key: !Ref ProtectedTagName
+        Value: "true"
+
+  EventDriverRule: 
+    Type: AWS::Events::Rule
+    Condition: EventAutoRemediate
+    Properties: 
+      Description: "AutoRemediation-EC2SerialConsoleEnabled"
+      EventPattern: 
+        source: 
+          - "aws.ec2"
+        detail: 
+          eventName: 
+            - "EnableSerialConsoleAccess"
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${DisableEC2SerialConsoleDocument}:$DEFAULT"
+          Id: "SSMRemediation"
+          RoleArn: !GetAtt EventDriverRuleRole.Arn
+        - !If
+          - EnableNotification
+          - Arn: !Ref SNSTopic
+            Id: "SNSNotify"
+          - !Ref "AWS::NoValue"
+      Tags: 
+        Key: !Ref ProtectedTagName
+        Value: "true"
+
+# Notify on rule not compliant
+  NotificationRule: 
+    Type: AWS::Events::Rule
+    Condition: EnableNotification
+    Properties: 
+      Description: "ConfigNotification-EC2SerialConsoleEnabled"
+      EventPattern: 
+        source: 
+          - "aws.config"
+        detail: 
+          messageType: 
+            - "ComplianceChangeNotification"
+          configRuleName: 
+            - "Custom-EC2SerialConsoleDisabled"
+          newEvaluationResult:
+            complianceType:
+              - "NON_COMPLIANT"
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: !Ref SNSTopic
+          Id: "SNSNotify"
+
